@@ -6,10 +6,10 @@ import copy
 import json
 import re
 import warnings
-from collections.abc import AsyncIterator, Callable, Iterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Iterator, Mapping, Sequence
 from functools import cached_property
 from operator import itemgetter
-from typing import Any, Final, Literal, Optional, Union, cast
+from typing import Any, Callable, Final, Literal, Optional, Union, cast
 
 import anthropic
 from langchain_core.callbacks import (
@@ -68,12 +68,30 @@ _MODEL_DEFAULT_MAX_OUTPUT_TOKENS: Final[dict[str, int]] = {
     "claude-opus-4-1": 32000,
     "claude-opus-4": 32000,
     "claude-sonnet-4": 64000,
+    "claude-sonnet-4-5": 64000,
     "claude-3-7-sonnet": 64000,
     "claude-3-5-sonnet": 8192,
     "claude-3-5-haiku": 8192,
     "claude-3-haiku": 4096,
 }
 _FALLBACK_MAX_OUTPUT_TOKENS: Final[int] = 4096
+
+
+def _normalize_tool_result_content(content: Any) -> list[dict[str, Any]]:
+    """Coerce ToolMessage content into Anthropic Responses `tool_result` blocks."""
+    if isinstance(content, str):
+        return [{"type": "text", "text": content}]
+    if isinstance(content, list):
+        normalized: list[dict[str, Any]] = []
+        for item in content:
+            if isinstance(item, str):
+                normalized.append({"type": "text", "text": item})
+            elif isinstance(item, dict) and item.get("type"):
+                normalized.append(item)
+            else:
+                normalized.append({"type": "text", "text": json.dumps(item,ensure_ascii=False)})
+        return normalized
+    return [{"type": "text", "text": json.dumps(content, ensure_ascii=False)}]
 
 
 def _default_max_tokens_for(model: str | None) -> int:
@@ -171,36 +189,37 @@ def _format_image(url: str) -> dict:
 
 
 def _merge_messages(
-    messages: Sequence[BaseMessage],
+        messages: Sequence[BaseMessage],
 ) -> list[Union[SystemMessage, AIMessage, HumanMessage]]:
-    """Merge runs of human/tool messages into single human messages with content blocks."""  # noqa: E501
+    """Merge runs of human/tool messages into single human messages with content blocks."""
     merged: list = []
     for curr in messages:
         if isinstance(curr, ToolMessage):
             if (
-                isinstance(curr.content, list)
-                and curr.content
-                and all(
-                    isinstance(block, dict) and block.get("type") == "tool_result"
-                    for block in curr.content
-                )
+                    isinstance(curr.content, list)
+                    and curr.content
+                    and all(
+                isinstance(block, dict) and block.get("type") == "tool_result"
+                for block in curr.content
+            )
             ):
                 curr = HumanMessage(curr.content)  # type: ignore[misc]
             else:
+                tool_blocks = _normalize_tool_result_content(curr.content)
                 curr = HumanMessage(  # type: ignore[misc]
                     [
                         {
                             "type": "tool_result",
-                            "content": curr.content,
                             "tool_use_id": curr.tool_call_id,
+                            "content": tool_blocks,
                             "is_error": curr.status == "error",
                         },
                     ],
                 )
         last = merged[-1] if merged else None
         if any(
-            all(isinstance(m, c) for m in (curr, last))
-            for c in (SystemMessage, HumanMessage)
+                all(isinstance(m, c) for m in (curr, last))
+                for c in (SystemMessage, HumanMessage)
         ):
             if isinstance(cast("BaseMessage", last).content, str):
                 new_content: list = [
@@ -493,10 +512,13 @@ def _format_messages(
                             },
                         )
                     elif block["type"] == "tool_result":
-                        tool_content = _format_messages(
-                            [HumanMessage(block["content"])],
-                        )[1][0]["content"]
-                        content.append({**block, "content": tool_content})
+                        normalized_content = _normalize_tool_result_content(block.get("content"))
+                        content.append(
+                            {
+                                **{k: v for k, v in block.items() if k in ("type", "tool_use_id", "is_error")},
+                                "content": normalized_content,
+                            }
+                        )
                     elif block["type"] in (
                         "code_execution_tool_result",
                         "mcp_tool_result",
@@ -846,7 +868,7 @@ class ChatAnthropic(BaseChatModel):
 
             "After examining both images carefully, I can see that they are actually identical."
 
-        ??? note "Files API"
+        .. dropdown:: Files API
 
             You can also pass in files that are managed through Anthropic's
             `Files API <https://docs.anthropic.com/en/docs/build-with-claude/files>`__:
@@ -909,7 +931,7 @@ class ChatAnthropic(BaseChatModel):
 
             "This appears to be a simple document..."
 
-        ??? note "Files API"
+        .. dropdown:: Files API
 
             You can also pass in files that are managed through Anthropic's
             `Files API <https://docs.anthropic.com/en/docs/build-with-claude/files>`__:
@@ -1077,7 +1099,7 @@ class ChatAnthropic(BaseChatModel):
         Prompt caching reduces processing time and costs for repetitive tasks or prompts
         with consistent elements
 
-        !!! note
+        .. note::
             Only certain models support prompt caching.
             See the `Claude documentation <https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching#supported-models>`__
             for a full list.
@@ -1128,7 +1150,7 @@ class ChatAnthropic(BaseChatModel):
                 cache_control={"type": "ephemeral"},
             )
 
-        ??? note "Extended caching"
+        .. dropdown:: Extended caching
 
             The cache lifetime is 5 minutes by default. If this is too short, you can
             apply one hour caching by setting ``ttl`` to ``'1h'``.
@@ -1274,7 +1296,7 @@ class ChatAnthropic(BaseChatModel):
         See LangChain `docs <https://python.langchain.com/docs/integrations/chat/anthropic/#built-in-tools>`__
         for more detail.
 
-        ??? note "Web search"
+        .. dropdown::  Web search
 
             .. code-block:: python
 
@@ -1291,7 +1313,7 @@ class ChatAnthropic(BaseChatModel):
 
                 response = llm_with_tools.invoke("How do I update a web app to TypeScript 5.5?")
 
-        ??? note "Web fetch (beta)"
+        .. dropdown::  Web fetch (beta)
 
             .. code-block:: python
 
@@ -1311,7 +1333,7 @@ class ChatAnthropic(BaseChatModel):
 
                 response = llm_with_tools.invoke("Please analyze the content at https://example.com/article")
 
-        ??? note "Code execution"
+        .. dropdown::  Code execution
 
             .. code-block:: python
 
@@ -1327,7 +1349,7 @@ class ChatAnthropic(BaseChatModel):
                     "Calculate the mean and standard deviation of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]"
                 )
 
-        ??? note "Remote MCP"
+        .. dropdown::  Remote MCP
 
             .. code-block:: python
 
@@ -1357,7 +1379,7 @@ class ChatAnthropic(BaseChatModel):
                     "spec (modelcontextprotocol/modelcontextprotocol) support?"
                 )
 
-        ??? note "Text editor"
+        .. dropdown::  Text editor
 
             .. code-block:: python
 
@@ -1383,7 +1405,7 @@ class ChatAnthropic(BaseChatModel):
                 'id': 'toolu_01VdNgt1YV7kGfj9LFLm6HyQ',
                 'type': 'tool_call'}]
 
-        ??? note "Memory tool"
+        .. dropdown::  Memory tool
 
             .. code-block:: python
 
@@ -1925,7 +1947,7 @@ class ChatAnthropic(BaseChatModel):
         Args:
             tools: A list of tool definitions to bind to this chat model.
                 Supports Anthropic format tool schemas and any tool definition handled
-                by `langchain_core.utils.function_calling.convert_to_openai_tool`.
+                by :meth:`~langchain_core.utils.function_calling.convert_to_openai_tool`.
             tool_choice: Which tool to require the model to call. Options are:
 
                 - name of the tool as a string or as dict ``{"type": "tool", "name": "<<tool_name>>"}``: calls corresponding tool;
@@ -1934,9 +1956,9 @@ class ChatAnthropic(BaseChatModel):
             parallel_tool_calls: Set to ``False`` to disable parallel tool use.
                 Defaults to ``None`` (no specification, which allows parallel tool use).
 
-                !!! version-added "Added in version 0.3.2"
+                .. versionadded:: 0.3.2
             kwargs: Any additional parameters are passed directly to
-                `langchain_anthropic.chat_models.ChatAnthropic.bind`.
+                :meth:`~langchain_anthropic.chat_models.ChatAnthropic.bind`.
 
         Example:
 
@@ -2207,7 +2229,7 @@ class ChatAnthropic(BaseChatModel):
                 If ``schema`` is a Pydantic class then the model output will be a
                 Pydantic instance of that class, and the model-generated fields will be
                 validated by the Pydantic class. Otherwise the model output will be a
-                dict and will not be validated. See `langchain_core.utils.function_calling.convert_to_openai_tool`
+                dict and will not be validated. See :meth:`~langchain_core.utils.function_calling.convert_to_openai_tool`
                 for more on how to properly specify types and descriptions of
                 schema fields when specifying a Pydantic or TypedDict class.
             include_raw:
@@ -2220,7 +2242,7 @@ class ChatAnthropic(BaseChatModel):
             kwargs: Additional keyword arguments are ignored.
 
         Returns:
-            A Runnable that takes same inputs as a `langchain_core.language_models.chat.BaseChatModel`.
+            A Runnable that takes same inputs as a :class:`~langchain_core.language_models.chat.BaseChatModel`.
 
             If ``include_raw`` is ``False`` and ``schema`` is a Pydantic class, Runnable outputs
             an instance of ``schema`` (i.e., a Pydantic object).
@@ -2310,7 +2332,8 @@ class ChatAnthropic(BaseChatModel):
                 #     'justification': 'Both a pound of bricks and a pound of feathers weigh one pound. The weight is the same, but the volume and density of the two substances differ.'
                 # }
 
-        !!! warning "Behavior changed in 0.1.22"
+        .. versionchanged:: 0.1.22
+
                 Added support for TypedDict class as `schema`.
 
         """  # noqa: E501
@@ -2419,7 +2442,8 @@ class ChatAnthropic(BaseChatModel):
 
                 403
 
-        !!! warning "Behavior changed in 0.3.0"
+        .. versionchanged:: 0.3.0
+
                 Uses Anthropic's `token counting API <https://docs.anthropic.com/en/docs/build-with-claude/token-counting>`__ to count tokens in messages.
 
         """  # noqa: D214,E501
